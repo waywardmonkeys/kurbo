@@ -144,6 +144,63 @@ impl RoundedRect {
     pub const fn is_nan(&self) -> bool {
         self.rect.is_nan() || self.radii.is_nan()
     }
+
+    /// Returns `true` if `point` lies within `self`.
+    ///
+    /// Points on the perimeter are considered inside.
+    #[inline]
+    pub fn contains(&self, point: impl Into<Point>) -> bool {
+        self.contains_point(point.into())
+    }
+
+    #[inline]
+    fn contains_point(&self, point: Point) -> bool {
+        if !point.is_finite() || !self.is_finite() {
+            return false;
+        }
+
+        let Rect { x0, y0, x1, y1 } = self.rect;
+        if point.x < x0 || point.x > x1 || point.y < y0 || point.y > y1 {
+            return false;
+        }
+
+        let radii = self.radii;
+        let in_top_left = point.x < x0 + radii.top_left && point.y < y0 + radii.top_left;
+        let in_top_right = point.x > x1 - radii.top_right && point.y < y0 + radii.top_right;
+        let in_bottom_right =
+            point.x > x1 - radii.bottom_right && point.y > y1 - radii.bottom_right;
+        let in_bottom_left =
+            point.x < x0 + radii.bottom_left && point.y > y1 - radii.bottom_left;
+
+        // If we're not in any corner region, we're inside (we already checked the bounds).
+        if !(in_top_left || in_top_right || in_bottom_right || in_bottom_left) {
+            return true;
+        }
+
+        // Corner regions: test against the relevant quarter-circle.
+        if in_top_left {
+            let dx = point.x - (x0 + radii.top_left);
+            let dy = point.y - (y0 + radii.top_left);
+            return dx * dx + dy * dy <= radii.top_left * radii.top_left;
+        }
+
+        if in_top_right {
+            let dx = point.x - (x1 - radii.top_right);
+            let dy = point.y - (y0 + radii.top_right);
+            return dx * dx + dy * dy <= radii.top_right * radii.top_right;
+        }
+
+        if in_bottom_right {
+            let dx = point.x - (x1 - radii.bottom_right);
+            let dy = point.y - (y1 - radii.bottom_right);
+            return dx * dx + dy * dy <= radii.bottom_right * radii.bottom_right;
+        }
+
+        // Must be bottom-left.
+        let dx = point.x - (x0 + radii.bottom_left);
+        let dy = point.y - (y1 - radii.bottom_left);
+        dx * dx + dy * dy <= radii.bottom_left * radii.bottom_left
+    }
 }
 
 #[doc(hidden)]
@@ -292,49 +349,8 @@ impl Shape for RoundedRect {
     }
 
     #[inline]
-    fn winding(&self, mut pt: Point) -> i32 {
-        let center = self.center();
-
-        // 1. Translate the point relative to the center of the rectangle.
-        pt.x -= center.x;
-        pt.y -= center.y;
-
-        // 2. Pick a radius value to use based on which quadrant the point is
-        //    in.
-        let radii = self.radii();
-        let radius = match pt {
-            pt if pt.x < 0.0 && pt.y < 0.0 => radii.top_left,
-            pt if pt.x >= 0.0 && pt.y < 0.0 => radii.top_right,
-            pt if pt.x >= 0.0 && pt.y >= 0.0 => radii.bottom_right,
-            pt if pt.x < 0.0 && pt.y >= 0.0 => radii.bottom_left,
-            _ => 0.0,
-        };
-
-        // 3. This is the width and height of a rectangle with one corner at
-        //    the center of the rounded rectangle, and another corner at the
-        //    center of the relevant corner circle.
-        let inside_half_width = (self.width() / 2.0 - radius).max(0.0);
-        let inside_half_height = (self.height() / 2.0 - radius).max(0.0);
-
-        // 4. Three things are happening here.
-        //
-        //    First, the x- and y-values are being reflected into the positive
-        //    (bottom-right quadrant). The radius has already been determined,
-        //    so it doesn't matter what quadrant is used.
-        //
-        //    After reflecting, the points are clamped so that their x- and y-
-        //    values can't be lower than the x- and y- values of the center of
-        //    the corner circle, and the coordinate system is transformed
-        //    again, putting (0, 0) at the center of the corner circle.
-        let px = (pt.x.abs() - inside_half_width).max(0.0);
-        let py = (pt.y.abs() - inside_half_height).max(0.0);
-
-        // 5. The transforms above clamp all input points such that they will
-        //    be inside the rounded rectangle if the corresponding output point
-        //    (px, py) is inside a circle centered around the origin with the
-        //    given radius.
-        let inside = px * px + py * py <= radius * radius;
-        if inside {
+    fn winding(&self, pt: Point) -> i32 {
+        if self.contains_point(pt) {
             1
         } else {
             0
@@ -349,6 +365,11 @@ impl Shape for RoundedRect {
     #[inline(always)]
     fn as_rounded_rect(&self) -> Option<RoundedRect> {
         Some(*self)
+    }
+
+    #[inline]
+    fn contains(&self, pt: Point) -> bool {
+        self.contains_point(pt)
     }
 }
 
@@ -476,5 +497,14 @@ mod tests {
         let epsilon = 1e-7;
         assert!((rect.area() - p.area()).abs() < epsilon);
         assert_eq!(p.winding(Point::new(0.0, 0.0)), 1);
+    }
+
+    #[test]
+    fn contains_rejects_nan() {
+        let rect = RoundedRect::new(-5.0, -5.0, 10.0, 20.0, 5.0);
+        assert!(!rect.contains(Point::new(f64::NAN, 0.0)));
+        assert!(!rect.contains(Point::new(0.0, f64::NAN)));
+        assert_eq!(rect.winding(Point::new(f64::NAN, 0.0)), 0);
+        assert_eq!(rect.winding(Point::new(0.0, f64::NAN)), 0);
     }
 }
